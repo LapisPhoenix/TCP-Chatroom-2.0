@@ -1,80 +1,141 @@
+import socket
 import threading
 import json
-import socket
-import json
-import code
+import sys
+import utils  # Local Import
 
 
 class Server:
-    def __init__(self, config_file: str):
-        self.config_file = config_file
-        # AF_INET, Address Family. Specifies the addresses that the socket will comminucate with.
-        # AF_INET is typically Internet Protocol 4, IPv4.
-        # Also, There's IPv6, AF_INET6
-        # See https://stackoverflow.com/questions/1593946/what-is-af-inet-and-why-do-i-need-it#1594039
+    def __init__(self, settings_config: str):
+        self.settings_config = settings_config
+        self.json_handler = utils.JsonHandler()
+        self.settings = self.json_handler.load_json_file(self.settings_config)
 
-        # SOCK_STREAM means that it is a TCP socket. (Transmission Control Protocol)
-        # SOCK_DGRAM means that it is a UDP socket.  (User Datagram Protocol)
+        if self.settings == 1:
+            # Failed to load
+            print("Failed to load settings config. Check the directory.")
+            sys.exit(1)
 
-        # A datagram is a basic transfer unit associated with a packet-switched network.
-        # Datagrams are typically structured in header and payload sections.
-        # Datagrams provide a connectionless communication service across a packet-switched network.
-        # The delivery, arrival time, and order of arrival of datagrams need not be guaranteed by the network.
-        self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Server IP address
+        self.IP = self.json_handler.get_element(self.settings, 'IP')
+        # Server Port
+        self.PORT = self.json_handler.get_element(self.settings, 'PORT')
+        # Max # of connections allowed
+        self.CONNECTION_LIMIT = self.json_handler.get_element(self.settings, 'CONNECTIONS')
 
-        self.settings = self.load_config()
+        # List of currently connected clients
+        self._connections = list()
 
-        self.server_address = (self.settings["IP"], self.settings["PORT"])
-        self.tcp_socket.bind(self.server_address)
-        self.tcp_socket.listen(self.settings["CONNECTIONS"])
-        self.message_queue = []
+        self._actions = {
+            1: self.on_connection,    # When a client connects to the server
+            2: self.is_connected,     # Ping to see if the client is still connected to the server
+            3: self.receive_message,  # When the client sends a message to the server
+        }
+        self._server_socket = None
 
-        self.open_connections()
+        self.start_server()
 
-    def load_config(self):
-        with open(self.config_file, "r") as config:
-            config = json.load(config)
+    def handle_payload(self, connection, payload, action: int):
+        """
+        Handle payloads from client
+        :param payload: dict
+        :param connection: connection that send request
+        :param action:
+        :return:
+        """
+        if action not in self._actions:
+            payload = {
+                "status": 400,
+                "message": "Invalid Action Code"
+            }
+            payload = self.package_payload(payload)
+            connection.send(payload)
+            return
 
-        return config
+        self._actions[action](connection, payload)
 
-    def process_client(self, connection, client):
-        # This method is used for handling a client in a separate thread
+    def on_connection(self, connection, payload):
+        client_data = payload.get("client_data")
+        self._connections.append((connection, client_data))
+
+        response_payload = {
+            "status": 200,
+            "message": "Successfully Created Connection"
+        }
+        connection.send(self.package_payload(response_payload))
+
+    def is_connected(self, connection, payload):
         try:
-            self.handle_client(connection, client)
-        except Exception as e:
-            print(f"Error handling client: {e}")
+            connection.send(b'PING')
+            data = connection.recv(1024)
+            if len(data) == 0:
+                # Dead
+                self.remove_dead_connection(connection)
+        except (socket.error, ConnectionError):
+            # Dead 2.0 (real!!!)
+            self.remove_dead_connection(connection)
 
-    def handle_client(self, connection, client):
-        try:
-            while True:
-                data = connection.recv(1024)
-                data = data.decode("utf-8")
-                data = (client[0], data)
-                self.message_queue.append(data)
-                self.handle_queue()
-                if not data:
-                    connection.close()
-        finally:
-            connection.close()
+    def remove_dead_connection(self, connection):
+        for i, (conn, _) in enumerate(self._connections):
+            if conn == connection:
+                self._connections.pop(i)
+                break
 
-    def handle_queue(self):
-        oldest_message = self.message_queue.pop(0)
-        payload = oldest_message[1]
-        payload = json.loads(payload)
-        username = payload["username"]
-        message = payload["message"]
-        message = f"{username} :: {message}"
+    def receive_message(self, connection, payload):
+        message = payload.get("message")
+        for conn, _ in self._connections:
+            conn.send(self.package_payload({"status": 200, "message": message}))
 
-    def open_connections(self):
-        c = code.Transcriber().generate_code(self.server_address[0], self.server_address[1])
-        print(f"Share this code with your friends: {c}")
-        threads = []
+    def accept_clients(self):
         while True:
-            connection, client = self.tcp_socket.accept()
-            t = threading.Thread(target=self.process_client, args=(connection, client))
-            t.start()
-            threads.append(t)
+            client_socket, client_address = self._server_socket.accept()
+
+            # Start a new thread to handle the client
+            threading.Thread(target=self.handle_client, args=(client_socket,)).start()
+
+    def handle_client(self, client_socket):
+        try:
+            # Put your existing client handling logic here
+            # Use self.handle_payload or other methods to interact with the client
+
+            # Example: sending a welcome message
+            welcome_message = {
+                "status": 200,
+                "message": "Welcome to the server!"
+            }
+            client_socket.send(self.package_payload(welcome_message))
+
+            # Example: handling client requests
+            while True:
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                payload = json.loads(data.decode("utf-8"))
+                action = payload.get("action", None)
+                if action is not None:
+                    self.handle_payload(client_socket, payload, action)
+
+        except (socket.error, ConnectionError) as e:
+            # Handle any exceptions that might occur during client interaction
+            print(f"Exception: {e}")
+
+        finally:
+            # Close the client socket when done
+            client_socket.close()
+
+    @staticmethod
+    def package_payload(payload):
+        payload = json.dumps(payload).encode("utf-8")
+        return payload
+
+    def start_server(self):
+        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_socket.bind((self.IP, self.PORT))
+        self._server_socket.listen(self.CONNECTION_LIMIT)
+
+        print(f"Server started on {self.IP}:{self.PORT}")
+        threading.Thread(target=self.accept_clients).start()
 
 
 if __name__ == "__main__":
-    test_server = Server("config1.json")
+    server = Server("config1.json")
