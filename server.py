@@ -83,8 +83,11 @@ class Server:
 
     def receive_message(self, connection, payload):
         message = payload.get("message")
+        username = payload.get("username")
         for conn, _ in self._connections:
             conn.send(self.package_payload({"status": 200, "message": message}))
+
+        print(f"[{username}]  {message}")
 
     def accept_clients(self):
         while True:
@@ -95,17 +98,6 @@ class Server:
 
     def handle_client(self, client_socket):
         try:
-            # Put your existing client handling logic here
-            # Use self.handle_payload or other methods to interact with the client
-
-            # Example: sending a welcome message
-            welcome_message = {
-                "status": 200,
-                "message": "Welcome to the server!"
-            }
-            client_socket.send(self.package_payload(welcome_message))
-
-            # Example: handling client requests
             while True:
                 data = client_socket.recv(1024)
                 if not data:
