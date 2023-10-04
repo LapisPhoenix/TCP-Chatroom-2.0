@@ -36,6 +36,7 @@ class Server:
         self.start_server()
 
     def handle_payload(self, connection, payload, action: int):
+        
         """
         Handle payloads from client
         :param payload: dict
@@ -52,14 +53,16 @@ class Server:
             connection.send(payload)
             return
 
-        self._actions[action](connection, payload)
+        self._actions[action](connection, payload)  # noqa
 
     def on_connection(self, connection, payload):
         client_data = payload.get("client_data")
+        print(client_data)
         self._connections.append((connection, client_data))
 
         response_payload = {
             "status": 200,
+            "action": 1,    # Unique, only sent with this
             "message": "Successfully Created Connection"
         }
         connection.send(self.package_payload(response_payload))
@@ -81,13 +84,20 @@ class Server:
                 self._connections.pop(i)
                 break
 
+    def broadcast(self, message, sender_connection):
+        for client, data in self._connections:
+            username = data.get("username")
+            if client != sender_connection:  # Check if the client is not the sender
+                try:
+                    msg = str.encode(f"{username}: {message}")
+                    client.send(msg)
+                except (socket.error, ConnectionError):
+                    # Handle any exceptions that might occur during the send operation
+                    self.remove_dead_connection(client)
+
     def receive_message(self, connection, payload):
         message = payload.get("message")
-        username = payload.get("username")
-        for conn, _ in self._connections:
-            conn.send(self.package_payload({"status": 200, "message": message}))
-
-        print(f"[{username}]  {message}")
+        self.broadcast(message, connection)
 
     def accept_clients(self):
         while True:
@@ -103,6 +113,7 @@ class Server:
                 if not data:
                     break
                 payload = json.loads(data.decode("utf-8"))
+                print(f"Received {len(data)} bytes of data from: {client_socket}")
                 action = payload.get("action", None)
                 if action is not None:
                     self.handle_payload(client_socket, payload, action)
@@ -121,12 +132,21 @@ class Server:
         return payload
 
     def start_server(self):
-        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_socket.bind((self.IP, self.PORT))
-        self._server_socket.listen(self.CONNECTION_LIMIT)
+        try:
+            self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._server_socket.bind((self.IP, self.PORT))
+            self._server_socket.listen(self.CONNECTION_LIMIT)   # noqa
 
-        print(f"Server started on {self.IP}:{self.PORT}")
-        threading.Thread(target=self.accept_clients).start()
+            print(f"Server started on {self.IP}:{self.PORT}")
+
+            while True:
+                client_socket, client_address = self._server_socket.accept()
+                threading.Thread(target=self.handle_client, args=(client_socket,)).start()
+
+        except Exception as e:
+            print(f"Exception starting server: {e}")
+        finally:
+            self._server_socket.close()
 
 
 if __name__ == "__main__":
